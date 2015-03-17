@@ -1,3 +1,10 @@
+yunohost-config-metronome (2.1.2) testing; urgency=low
+
+  [ opi ]
+  * [enh] More secure configuration by default
+
+ -- Julien Malik <julien.malik@paraiso.me>  Tue, 17 Mar 2015 22:43:26 +0100
+
 yunohost-config-metronome (2.1.1) testing; urgency=low
 
   * Bump version to 2.1.1 to bootstrap new build workflow
