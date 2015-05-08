@@ -1,3 +1,9 @@
+yunohost-config-metronome (2.2.0) stable; urgency=low
+
+  * Bumping to version 2.2.0
+
+ -- kload <kload@kload.fr>  Fri, 08 May 2015 20:09:31 +0000
+
 yunohost-config-metronome (2.1.2) testing; urgency=low
 
   [ opi ]
