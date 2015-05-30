@@ -1,3 +1,10 @@
+yunohost-config-metronome (2.3.0) testing; urgency=low
+
+  * [fix] Update mod_auth_ldap2 to work with Metronome v3.7 (thanks
+        to maranda)
+
+ -- Jérôme Lebleu <jerome@yunohost.org>  Sat, 30 May 2015 11:56:38 +0200
+
 yunohost-config-metronome (2.2.0) stable; urgency=low
 
   * Bumping to version 2.2.0
