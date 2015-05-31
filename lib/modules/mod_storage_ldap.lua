@@ -1,39 +1,42 @@
 -- vim:sts=4 sw=4
 
--- Prosody IM
+-- Metronome IM
 -- Copyright (C) 2008-2010 Matthew Wild
 -- Copyright (C) 2008-2010 Waqas Hussain
 -- Copyright (C) 2012 Rob Hoelz
+-- Copyright (C) 2015 YUNOHOST.ORG
 --
 -- This project is MIT/X11 licensed. Please see the
 -- COPYING file in the source package for more information.
---
 
 ----------------------------------------
 -- Constants and such --
 ----------------------------------------
 
 local setmetatable = setmetatable;
-local ldap         = module:require 'ldap';
-local vcardlib     = module:require 'vcard';
-local st           = require 'util.stanza';
-local gettime      = require 'socket'.gettime;
+
+local get_config = require "core.configmanager".get;
+local ldap       = module:require 'ldap';
+local vcardlib   = module:require 'vcard';
+local st         = require 'util.stanza';
+local gettime    = require 'socket'.gettime;
+
+local log = module._log
 
 if not ldap then
     return;
 end
 
 local CACHE_EXPIRY = 300;
-local params       = module:get_option('ldap');
 
 ----------------------------------------
 -- Utility Functions --
 ----------------------------------------
 
-local function ldap_record_to_vcard(record)
+local function ldap_record_to_vcard(record, format)
     return vcardlib.create {
         record = record,
-        format = params.vcard_format,
+        format = format,
     }
 end
 
@@ -44,14 +47,17 @@ do
   local last_fetch_time;
 
   local function populate_user_cache()
+      local user_c = get_config(module.host, 'ldap').user;
+      if not user_c then return; end
+
       local ld = ldap.getconnection();
 
-      local usernamefield = params.user.usernamefield;
-      local namefield     = params.user.namefield;
+      local usernamefield = user_c.usernamefield;
+      local namefield     = user_c.namefield;
 
       user_cache = {};
 
-      for _, attrs in ld:search { base = params.user.basedn, scope = 'onelevel', filter = params.user.filter } do
+      for _, attrs in ld:search { base = user_c.basedn, scope = 'onelevel', filter = user_c.filter } do
           user_cache[attrs[usernamefield]] = attrs[namefield];
       end
       last_fetch_time = gettime();
@@ -69,112 +75,169 @@ do
 end
 
 ----------------------------------------
--- General Setup --
+-- Base LDAP store class --
 ----------------------------------------
 
-local ldap_store   = {};
-ldap_store.__index = ldap_store;
+local function ldap_store(config)
+  local self = {};
+  local config = config;
 
-local adapters = {
-    roster = {},
-    vcard  = {},
-}
+  function self:get(username)
+      return nil, "Data getting is not available for this storage backend";
+  end
 
-for k, v in pairs(adapters) do
-    setmetatable(v, ldap_store);
-    v.__index = v;
-    v.name    = k;
+  function self:set(username, data)
+      return nil, "Data setting is not available for this storage backend";
+  end
+
+  return self;
 end
 
-function ldap_store:get(username)
-    return nil, "get method unimplemented on store '" .. tostring(self.name) .. "'"
-end
-
-function ldap_store:set(username, data)
-    return nil, "LDAP storage is currently read-only";
-end
+local adapters = {};
 
 ----------------------------------------
 -- Roster Storage Implementation --
 ----------------------------------------
 
-function adapters.roster:get(username)
-    local ld = ldap.getconnection();
-    local contacts = {};
+adapters.roster = function (config)
+  -- Validate configuration requirements
+  if not config.groups then return nil; end
 
-    local memberfield = params.groups.memberfield;
-    local namefield   = params.groups.namefield;
-    local filter      = memberfield .. '=' .. tostring(username);
+  local self = ldap_store(config)
 
-    local groups = {};
-    for _, config in ipairs(params.groups) do
-        groups[ config[namefield] ] = config.name;
-    end
+  function self:get(username)
+      local ld = ldap.getconnection();
+      local contacts = {};
 
-    -- XXX this kind of relies on the way we do groups at INOC
-    for _, attrs in ld:search { base = params.groups.basedn, scope = 'onelevel', filter = filter } do
-        if groups[ attrs[namefield] ] then
-            local members = attrs[memberfield];
+      local memberfield = config.groups.memberfield;
+      local namefield   = config.groups.namefield;
+      local filter      = memberfield .. '=' .. tostring(username);
 
-            for _, user in ipairs(members) do
-                if user ~= username then
-                    local jid    = user .. '@' .. module.host;
-                    local record = contacts[jid];
+      local groups = {};
+      for _, config in ipairs(config.groups) do
+          groups[ config[namefield] ] = config.name;
+      end
 
-                    if not record then
-                        record = {
-                            subscription = 'both',
-                            groups       = {},
-                            name         = get_alias_for_user(user),
-                        };
-                        contacts[jid] = record;
-                    end
+      log("debug", "Found %d group(s) for user %s", select('#', groups), username)
 
-                    record.groups[ groups[ attrs[namefield] ] ] = true;
-                end
-            end
-        end
-    end
+      -- XXX this kind of relies on the way we do groups at INOC
+      for _, attrs in ld:search { base = config.groups.basedn, scope = 'onelevel', filter = filter } do
+          if groups[ attrs[namefield] ] then
+              local members = attrs[memberfield];
 
-    return contacts;
+              for _, user in ipairs(members) do
+                  if user ~= username then
+                      local jid    = user .. '@' .. module.host;
+                      local record = contacts[jid];
+
+                      if not record then
+                          record = {
+                              subscription = 'both',
+                              groups       = {},
+                              name         = get_alias_for_user(user),
+                          };
+                          contacts[jid] = record;
+                      end
+
+                      record.groups[ groups[ attrs[namefield] ] ] = true;
+                  end
+              end
+          end
+      end
+
+      return contacts;
+  end
+
+  function self:set(username, data)
+      log("warn", "Setting data in Roster LDAP storage is not supported yet")
+      return nil, "not supported";
+  end
+
+  return self;
 end
 
 ----------------------------------------
 -- vCard Storage Implementation --
 ----------------------------------------
 
-function adapters.vcard:get(username)
-    if not params.vcard_format then
-        return nil, '';
-    end
+adapters.vcard = function (config)
+  -- Validate configuration requirements
+  if not config.vcard_format or not config.user then return nil; end
 
-    local ld     = ldap.getconnection();
-    local filter = params.user.usernamefield .. '=' .. tostring(username);
+  local self = ldap_store(config)
 
-    local match = ldap.singlematch {
-        base   = params.user.basedn,
-        filter = filter,
-    };
-    if match then
-        match.jid = username .. '@' .. module.host
-        return st.preserialize(ldap_record_to_vcard(match));
-    else
-        return nil, 'not found';
-    end
+  function self:get(username)
+      local ld     = ldap.getconnection();
+      local filter = config.user.usernamefield .. '=' .. tostring(username);
+
+      log("debug", "Retrieving vCard for user '%s'", username);
+
+      local match = ldap.singlematch {
+          base   = config.user.basedn,
+          filter = filter,
+      };
+      if match then
+          match.jid = username .. '@' .. module.host
+          return st.preserialize(ldap_record_to_vcard(match, config.vcard_format));
+      else
+          return nil, "username not found";
+      end
+  end
+
+  function self:set(username, data)
+      log("warn", "Setting data in vCard LDAP storage is not supported yet")
+      return nil, "not supported";
+  end
+
+  return self;
 end
 
 ----------------------------------------
 -- Driver Definition --
 ----------------------------------------
 
-local driver = {};
+cache = {};
 
-function driver:open(store, typ)
-    local adapter = adapters[store];
+local driver = { name = "ldap" };
 
-    if adapter and not typ then
-        return adapter;
+function driver:open(store)
+    log("debug", "Opening ldap storage backend for host '%s' and store '%s'", module.host, store);
+
+    if not cache[module.host] then
+        log("debug", "Caching adapters for the host '%s'", module.host);
+
+        local ad_config = get_config(module.host, "ldap");
+        local ad_cache  = {};
+        for k, v in pairs(adapters) do
+            ad_cache[k] = v(ad_config);
+        end
+
+        cache[module.host] = ad_cache;
     end
-    return nil, "unsupported-store";
+
+    local adapter = cache[module.host][store];
+
+    if not adapter then
+        log("info", "Unavailable adapter for store '%s'", store);
+        return nil, "unsupported-store";
+    end
+    return adapter;
 end
-module:provides("storage", driver);
+
+function driver:stores(username, type, pattern)
+    return nil, "not implemented";
+end
+
+function driver:store_exists(username, datastore, type)
+    return nil, "not implemented";
+end
+
+function driver:purge(username)
+    return nil, "not implemented";
+end
+
+function driver:users()
+    return nil, "not implemented";
+end
+
+module:add_item("data-driver", driver);
